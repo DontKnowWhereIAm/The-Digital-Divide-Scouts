@@ -91,11 +91,11 @@ st.title("District Impact Dashboard")
 
 with st.sidebar:
     st.header("Data and Filters")
-    api_key = st.text_input("Census API key", type="password")
     
     selected_states = st.multiselect("State(s)", options=sorted(STATES.keys()), default=["North Carolina"])
     selected_fips = tuple(STATES[s] for s in selected_states)
     
+    api_key = st.secrets["CENSUS_API_KEY"]
     if api_key:
         temp_df, _ = load_homework_gap_data(api_key, 2022, selected_fips)
         income_range = st.slider("Median household income range", 0, int(temp_df["median_income"].max() or 150000), (0, 150000))
@@ -105,10 +105,6 @@ with st.sidebar:
         selected_access = st.multiselect("Access level", options=access_options, default=access_options)
         gap_range = st.slider("Connectivity gap (%)", 0.0, 100.0, (0.0, 100.0))
         top_n = st.slider("Show top districts", 5, 50, 15, 5)
-
-if not api_key:
-    st.info("Enter API Key in the sidebar to start.")
-    st.stop()
 
 df_raw, gdf_map = load_homework_gap_data(api_key, 2022, selected_fips)
 
