@@ -233,7 +233,11 @@ else:
                 try:
                     client = OpenAI(
                         api_key=openrouter_key,
-                        base_url="https://openrouter.ai/api/v1"
+                        base_url="https://openrouter.ai/api/v1",
+                        default_headers={
+                            "HTTP-Referer": "http://localhost:8501", # Required for OpenRouter
+                            "X-Title": "Digital Divide Scouts",      # Required for OpenRouter
+                        }
                     )
                     response = client.chat.completions.create(
                         model="openai/gpt-4o-mini",
