@@ -1,7 +1,10 @@
 import os
 from typing import Optional
 
+from dotenv import load_dotenv
 from openai import OpenAI
+
+load_dotenv()  # loads .env into os.environ
 
 import geopandas as gpd
 import numpy as np
@@ -575,10 +578,7 @@ st.download_button(
 # =========================
 # 5) AI ASSISTANT
 # =========================
-OPENROUTER_API_KEY = os.getenv(
-    "OPENROUTER_API_KEY",
-    "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",
-)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "openai/gpt-4o-mini"
 
 st.divider()
@@ -674,3 +674,4 @@ if st.session_state.ai_messages:
     if st.button("🗑️ Clear chat", key="clear_ai_chat"):
         st.session_state.ai_messages = []
         st.rerun()
+
