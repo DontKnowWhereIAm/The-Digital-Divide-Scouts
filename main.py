@@ -183,18 +183,37 @@ with col2:
     st.subheader("Map of filtered districts")
     if not allocated_df.empty:
         map_fig = px.choropleth_mapbox(
-            allocated_df, 
-            geojson=allocated_df.geometry.__geo_interface__, 
-            locations=allocated_df.index,
-            color="urgency_score", 
-            hover_name="district_name",
-            center={"lat": float(allocated_df["latitude"].mean()), "lon": float(allocated_df["longitude"].mean())},
-            zoom=3.5, 
-            mapbox_style="carto-positron", 
-            color_continuous_scale=BLUE_GRADIENT
+        allocated_df,
+        geojson=allocated_df.geometry.__geo_interface__,
+        locations=allocated_df.index,
+        color="urgency_score",
+        hover_name="district_name",
+        center={"lat": float(allocated_df["latitude"].mean()), "lon": float(allocated_df["longitude"].mean())},
+        zoom=3.5,
+        mapbox_style="carto-positron",
+        color_continuous_scale=BLUE_GRADIENT
         )
         map_fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(map_fig, use_container_width=True)
+
+        st.subheader("Connectivity vs. Household Income")
+        scatter_fig = px.scatter(
+        allocated_df,
+        x="median_income",
+        y="pct_no_internet",
+        size="students_under_18",
+        color="urgency_score",
+        hover_name="district_name",
+        color_continuous_scale=BLUE_GRADIENT,
+        labels={"median_income": "Median Income", "pct_no_internet": "% No Internet"}
+        )
+        scatter_fig.update_traces(
+        marker=dict(
+        line=dict(width=1, color='white'),
+        opacity=0.9
+        )
+        )
+        st.plotly_chart(scatter_fig, use_container_width=True)
     else:
         st.warning("Adjust filters to see data on map.")
 
