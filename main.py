@@ -113,29 +113,20 @@ with st.sidebar:
     selected_states = st.multiselect("State(s)", options=sorted(STATES.keys()), default=["North Carolina"])
     selected_fips = tuple(STATES[s] for s in selected_states)
     
-    api_key = st.secrets["CENSUS_API_KEY"]
-    if api_key:
-        df_raw, gdf_map = load_homework_gap_data(api_key, 2022, selected_fips)
-        income_range = st.slider("Median household income range", 0, int(df_raw["median_income"].max() or 250000), (0, 250000))
-        region_options = ["West", "Central", "East"]
-        selected_regions = st.multiselect("Region", options=region_options, default=region_options)
-        access_options = ["Critical", "High", "Moderate", "Lower"]
-        selected_access = st.multiselect("Access level", options=access_options, default=access_options)
-        gap_range = st.slider("Connectivity gap (%)", 0.0, 100.0, (0.0, 100.0))
-        laptops_available = st.number_input("Laptops available for distribution", min_value=0, value=3350)
-        top_n = st.slider("Show top districts", 5, 100, 20)
-
-df_raw, gdf_map = load_homework_gap_data(api_key, 2022, selected_fips)
-
-filtered_gdf = gdf_map[
-    (gdf_map["median_income"].between(income_range[0], income_range[1])) &
-    (gdf_map["region"].isin(selected_regions)) &
-    (gdf_map["access_level"].isin(selected_access)) &
-    (gdf_map["pct_no_internet"] * 100).between(gap_range[0], gap_range[1])
-].copy()
-if not api_key:
-    st.info("Enter API Key in the sidebar to start.")
-    st.stop()
+    api_key = st.text_input("Census API Key", type="password", help="Enter your Census API Key")
+    if not api_key:
+        st.info("Enter Census API Key in the sidebar to start.")
+        st.stop()
+        
+    df_raw, gdf_map = load_homework_gap_data(api_key, 2022, selected_fips)
+    income_range = st.slider("Median household income range", 0, int(df_raw["median_income"].max() or 250000), (0, 250000))
+    region_options = ["West", "Central", "East"]
+    selected_regions = st.multiselect("Region", options=region_options, default=region_options)
+    access_options = ["Critical", "High", "Moderate", "Lower"]
+    selected_access = st.multiselect("Access level", options=access_options, default=access_options)
+    gap_range = st.slider("Connectivity gap (%)", 0.0, 100.0, (0.0, 100.0))
+    laptops_available = st.number_input("Laptops available for distribution", min_value=0, value=3350)
+    top_n = st.slider("Show top districts", 5, 100, 20)
 
 # =========================
 # 3) DATA PROCESSING
@@ -203,7 +194,7 @@ with col2:
 # =========================
 st.divider()
 st.subheader("🤖 AI Assistant")
-openrouter_key = os.getenv("OPENROUTER_API_KEY")
+openrouter_key = os.getenv("OPENROUTER_API_KEY") or st.text_input("OpenRouter API Key", type="password", help="Enter your OpenRouter API Key to enable the AI Assistant")
 
 if openrouter_key:
     if "ai_messages" not in st.session_state:
