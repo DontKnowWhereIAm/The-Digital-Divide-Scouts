@@ -110,10 +110,6 @@ st.markdown("Interactive decision dashboard for targeting laptop grants to high-
 with st.sidebar:
     st.header("Data and Filters")
     
-    api_key = st.text_input("Census API key", type="password", value=os.getenv("CENSUS_API_KEY", ""))
-    # Restored to manual text input
-    api_key = st.text_input("Census API key", type="password")
-    
     selected_states = st.multiselect("State(s)", options=sorted(STATES.keys()), default=["North Carolina"])
     selected_fips = tuple(STATES[s] for s in selected_states)
     
