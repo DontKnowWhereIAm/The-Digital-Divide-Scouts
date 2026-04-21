@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import io
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -445,6 +446,73 @@ with hist_left:
         height=450,
     )
     st.plotly_chart(hist_fig, use_container_width=True)
+
+    # Downloadable export of districts receiving laptops
+    export_df = (
+        allocated_df[allocated_df["laptops_allocated"] > 0][[
+            "district_name",
+            "GEOID",
+            "region",
+            "access_level",
+            "students_under_18",
+            "households_no_internet",
+            "households_no_computer",
+            "median_income",
+            "pct_no_internet",
+            "urgency_score",
+            "laptops_allocated",
+            "students_helped_est",
+        ]]
+        .copy()
+        .sort_values(["laptops_allocated", "urgency_score"], ascending=[False, False])
+    )
+
+    export_df = export_df.rename(columns={
+        "district_name": "District",
+        "GEOID": "District GEOID",
+        "region": "Region",
+        "access_level": "Access Level",
+        "students_under_18": "Students Under 18",
+        "households_no_internet": "Households With No Internet",
+        "households_no_computer": "Households With No Computer",
+        "median_income": "Median Household Income",
+        "pct_no_internet": "Percent No Internet",
+        "urgency_score": "Urgency Score",
+        "laptops_allocated": "Laptops Allocated",
+        "students_helped_est": "Estimated Students Helped",
+    })
+
+    export_df["Percent No Internet"] = (export_df["Percent No Internet"] * 100).round(1)
+    export_df["Urgency Score"] = export_df["Urgency Score"].round(3)
+    export_df["Median Household Income"] = export_df["Median Household Income"].round(0)
+
+    if export_df.empty:
+        st.info("No districts currently have laptop allocations to export.")
+    else:
+        csv_data = export_df.to_csv(index=False).encode("utf-8")
+
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            export_df.to_excel(writer, index=False, sheet_name="Laptop Allocations")
+        excel_data = excel_buffer.getvalue()
+
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button(
+                "Download allocation CSV",
+                data=csv_data,
+                file_name="district_laptop_allocations.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with dl2:
+            st.download_button(
+                "Download allocation Excel",
+                data=excel_data,
+                file_name="district_laptop_allocations.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
 with hist_right:
     st.subheader("Top districts by allocated laptops")
