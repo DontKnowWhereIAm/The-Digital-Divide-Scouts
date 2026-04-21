@@ -182,12 +182,27 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
 
 def simulate_allocation(df, total_laptops):
     sim = df.copy()
-    if sim.empty or sim["urgency_score"].sum() == 0:
+
+    if sim.empty:
+        sim["laptops_allocated"] = 0
+        sim["students_helped_est"] = 0
+        return sim
+
+    urgency = sim["urgency_score"].fillna(0).clip(lower=0)
+
+    if urgency.sum() == 0 or total_laptops <= 0:
         sim["laptops_allocated"] = 0
     else:
-        sim["laptops_allocated"] = (
-            sim["urgency_score"] / sim["urgency_score"].sum() * total_laptops
-        ).astype(int)
+        raw_alloc = (urgency / urgency.sum()) * total_laptops
+        sim["laptops_allocated"] = np.floor(raw_alloc).astype(int)
+
+        remaining = int(total_laptops - sim["laptops_allocated"].sum())
+        if remaining > 0:
+            remainders = (raw_alloc - np.floor(raw_alloc)).sort_values(ascending=False)
+            for idx in remainders.index[:remaining]:
+                sim.loc[idx, "laptops_allocated"] += 1
+
+    sim["students_helped_est"] = sim[["laptops_allocated", "students_under_18"]].min(axis=1)
     return sim
 
 
@@ -390,6 +405,33 @@ with col2:
         )
     )
     st.plotly_chart(scatter_fig, use_container_width=True)
+
+    st.subheader("Simulated laptop allocation impact")
+
+    impact_df = allocated_df.sort_values("laptops_allocated", ascending=False).head(10).copy()
+
+    if impact_df.empty or impact_df["laptops_allocated"].sum() == 0:
+        st.info("Enter more than 0 laptops to see the simulated allocation impact.")
+    else:
+        impact_fig = px.bar(
+            impact_df.sort_values("laptops_allocated", ascending=True),
+            x="laptops_allocated",
+            y="district_name",
+            orientation="h",
+            hover_data={
+                "urgency_score": ':.3f',
+                "students_under_18": True,
+                "students_helped_est": True,
+                "pct_no_internet": ':.1%',
+            },
+            title="Simulated laptop allocation impact",
+        )
+        impact_fig.update_layout(
+            xaxis_title="Allocated laptops",
+            yaxis_title="District",
+            height=450,
+        )
+        st.plotly_chart(impact_fig, use_container_width=True)
 
 # =========================
 # 6) AI ASSISTANT
