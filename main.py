@@ -34,6 +34,7 @@ BLUE_GRADIENT = ["#deebf7", "#9ecae1", "#3182bd", "#08519c", "#002147"]
 
 st.set_page_config(page_title="Homework Gap Dashboard", layout="wide")
 
+
 # =========================
 # 1) HELPERS
 # =========================
@@ -81,7 +82,6 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
     for fips in state_fips_tuple:
         geo_in = f"state:{fips}"
 
-        # Census main table
         r_m = requests.get(
             acs_base,
             params={
@@ -96,7 +96,6 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
         j_m = r_m.json()
         dfs_main.append(pd.DataFrame(j_m[1:], columns=j_m[0]))
 
-        # Census income table
         r_i = requests.get(
             acs_sub,
             params={
@@ -111,7 +110,6 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
         j_i = r_i.json()
         dfs_income.append(pd.DataFrame(j_i[1:], columns=j_i[0]))
 
-        # TIGER geometry per state
         tiger_url = (
             "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/School/MapServer/10/query"
             f"?where=STATE='{fips}'&outFields=GEOID,NAME,STATE&outSR=4326&f=geojson&returnGeometry=true"
@@ -163,7 +161,6 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
 
     full_gdf = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs="EPSG:4326")
 
-    # Simplify more for large national views to keep rendering responsive
     simplify_tol = 0.015 if len(state_fips_tuple) > 20 else 0.005
     full_gdf["geometry"] = full_gdf["geometry"].simplify(
         tolerance=simplify_tol,
@@ -182,26 +179,27 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
 
 def simulate_allocation(df, total_laptops):
     sim = df.copy()
+    weight = sim["urgency_score"].fillna(0).clip(lower=0)
 
-    if sim.empty:
+    if sim.empty or total_laptops <= 0 or weight.sum() == 0:
         sim["laptops_allocated"] = 0
         sim["students_helped_est"] = 0
         return sim
 
-    urgency = sim["urgency_score"].fillna(0).clip(lower=0)
+    raw_allocation = (weight / weight.sum()) * total_laptops
+    base_allocation = np.floor(raw_allocation).astype(int)
 
-    if urgency.sum() == 0 or total_laptops <= 0:
-        sim["laptops_allocated"] = 0
-    else:
-        raw_alloc = (urgency / urgency.sum()) * total_laptops
-        sim["laptops_allocated"] = np.floor(raw_alloc).astype(int)
+    remaining = total_laptops - int(base_allocation.sum())
+    fractional_order = (raw_allocation - np.floor(raw_allocation)).sort_values(ascending=False).index.tolist()
 
-        remaining = int(total_laptops - sim["laptops_allocated"].sum())
-        if remaining > 0:
-            remainders = (raw_alloc - np.floor(raw_alloc)).sort_values(ascending=False)
-            for idx in remainders.index[:remaining]:
-                sim.loc[idx, "laptops_allocated"] += 1
+    final_alloc = base_allocation.copy()
+    for idx in fractional_order:
+        if remaining <= 0:
+            break
+        final_alloc.loc[idx] += 1
+        remaining -= 1
 
+    sim["laptops_allocated"] = final_alloc.astype(int)
     sim["students_helped_est"] = sim[["laptops_allocated", "students_under_18"]].min(axis=1)
     return sim
 
@@ -253,7 +251,8 @@ except Exception as e:
     st.stop()
 
 with st.sidebar:
-    income_max = int(df_raw["median_income"].dropna().max()) if not df_raw["median_income"].dropna().empty else 250000
+    income_nonnull = df_raw["median_income"].dropna()
+    income_max = int(income_nonnull.max()) if not income_nonnull.empty else 250000
 
     income_range = st.slider(
         "Median household income range",
@@ -286,7 +285,7 @@ with st.sidebar:
     laptops_available = st.number_input(
         "Laptops available for distribution",
         min_value=0,
-        value=3350,
+        value=3000,
     )
 
     top_n = st.slider("Show top districts", 5, 100, 20)
@@ -301,7 +300,7 @@ filtered_gdf = gdf_map[
     ((gdf_map["pct_no_internet"] * 100).between(gap_range[0], gap_range[1]))
 ].copy()
 
-allocated_df = simulate_allocation(filtered_gdf, laptops_available)
+allocated_df = simulate_allocation(filtered_gdf, int(laptops_available))
 
 # =========================
 # 4) DASHBOARD METRICS
@@ -314,9 +313,9 @@ m4.metric("Households with no computer", f"{int(allocated_df['households_no_comp
 
 m5, m6, m7, m8 = st.columns(4)
 m5.metric("Laptops allocated", f"{int(allocated_df['laptops_allocated'].sum()):,}" if not allocated_df.empty else "0")
-m6.metric("Estimated students helped", f"{int(allocated_df['laptops_allocated'].sum() * 1.1):,}" if not allocated_df.empty else "0")
-m7.metric("Avg. device-gap closed", "0.6%" if not allocated_df.empty else "0.0%")
-m8.write("")
+m6.metric("Estimated students helped", f"{int(allocated_df['students_helped_est'].sum()):,}" if not allocated_df.empty else "0")
+m7.metric("Avg. laptops per district", f"{allocated_df['laptops_allocated'].mean():.2f}" if not allocated_df.empty else "0.00")
+m8.metric("Largest district allocation", f"{int(allocated_df['laptops_allocated'].max()):,}" if not allocated_df.empty else "0")
 
 if allocated_df.empty:
     st.warning("No districts match the current filters.")
@@ -325,10 +324,10 @@ if allocated_df.empty:
 # =========================
 # 5) VISUALS
 # =========================
-col1, col2 = st.columns((1, 1))
+left, right = st.columns((1, 1))
 
-with col1:
-    st.subheader("Urgency Ranking")
+with left:
+    st.subheader("Urgency ranking")
     table_cols = [
         "district_name",
         "region",
@@ -336,24 +335,41 @@ with col1:
         "students_under_18",
         "pct_no_internet",
         "median_income",
+        "urgency_score",
+        "laptops_allocated",
     ]
+    ranking_df = allocated_df.sort_values("urgency_score", ascending=False).head(top_n).copy()
+    ranking_df["pct_no_internet"] = (ranking_df["pct_no_internet"] * 100).round(1)
+    ranking_df["urgency_score"] = ranking_df["urgency_score"].round(3)
+
     st.dataframe(
-        allocated_df.sort_values("urgency_score", ascending=False).head(top_n)[table_cols],
+        ranking_df[table_cols],
         use_container_width=True,
+        hide_index=True,
     )
 
-    st.subheader("Top districts ranked by urgency score")
-    bar_df = allocated_df.sort_values("urgency_score").tail(top_n)
-    bar_fig = px.bar(
-        bar_df,
+    bar_df = allocated_df.sort_values("urgency_score", ascending=False).head(top_n).copy()
+    urgency_fig = px.bar(
+        bar_df.sort_values("urgency_score", ascending=True),
         x="urgency_score",
         y="district_name",
         orientation="h",
-        color_discrete_sequence=[NAVY_BLUE],
+        hover_data={
+            "students_under_18": True,
+            "pct_no_internet": ':.1%',
+            "median_income": ':$,.0f',
+            "laptops_allocated": True,
+        },
+        title="Top districts ranked by urgency score",
     )
-    st.plotly_chart(bar_fig, use_container_width=True)
+    urgency_fig.update_layout(
+        xaxis_title="Urgency score",
+        yaxis_title="District",
+        height=550,
+    )
+    st.plotly_chart(urgency_fig, use_container_width=True)
 
-with col2:
+with right:
     st.subheader("Map of filtered districts")
 
     MAP_DISTRICT_CAP = 300
@@ -376,6 +392,11 @@ with col2:
             locations=map_df.index,
             color="urgency_score",
             hover_name="district_name",
+            hover_data={
+                "students_under_18": True,
+                "pct_no_internet": ':.1%',
+                "laptops_allocated": True,
+            },
             center={
                 "lat": float(map_df["latitude"].mean()),
                 "lon": float(map_df["longitude"].mean()),
@@ -384,37 +405,60 @@ with col2:
             mapbox_style="carto-positron",
             color_continuous_scale=BLUE_GRADIENT,
         )
-        map_fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+        map_fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=550)
         st.plotly_chart(map_fig, use_container_width=True)
 
-    st.subheader("Connectivity vs. Household Income")
-    scatter_fig = px.scatter(
-        allocated_df,
-        x="median_income",
-        y="pct_no_internet",
-        size="students_under_18",
-        color="urgency_score",
-        hover_name="district_name",
-        color_continuous_scale=BLUE_GRADIENT,
-        labels={"median_income": "Median Income", "pct_no_internet": "% No Internet"},
+# =========================
+# 6) ALLOCATION VISUALS
+# =========================
+alloc_m1, alloc_m2, alloc_m3 = st.columns(3)
+alloc_positive = int((allocated_df["laptops_allocated"] > 0).sum())
+alloc_zero = int((allocated_df["laptops_allocated"] == 0).sum())
+alloc_max = int(allocated_df["laptops_allocated"].max()) if not allocated_df.empty else 0
+
+alloc_m1.metric("Districts receiving at least 1 laptop", f"{alloc_positive:,}")
+alloc_m2.metric("Districts receiving 0 laptops", f"{alloc_zero:,}")
+alloc_m3.metric("Largest district allocation", f"{alloc_max:,}")
+
+hist_left, hist_right = st.columns(2)
+
+with hist_left:
+    st.subheader("Distribution of laptop allocations across districts")
+
+    hist_df = allocated_df.copy()
+    max_alloc = int(hist_df["laptops_allocated"].max()) if not hist_df.empty else 0
+    nbins = min(50, max(10, max_alloc + 1))
+
+    hist_fig = px.histogram(
+        hist_df,
+        x="laptops_allocated",
+        nbins=nbins,
+        hover_data={
+            "district_name": False,
+            "urgency_score": False,
+        },
+        title="How many districts received each allocation amount",
     )
-    scatter_fig.update_traces(
-        marker=dict(
-            line=dict(width=1, color="white"),
-            opacity=0.9,
-        )
+    hist_fig.update_layout(
+        xaxis_title="Laptops allocated",
+        yaxis_title="Number of districts",
+        height=450,
     )
-    st.plotly_chart(scatter_fig, use_container_width=True)
+    st.plotly_chart(hist_fig, use_container_width=True)
 
-    st.subheader("Simulated laptop allocation impact")
+with hist_right:
+    st.subheader("Top districts by allocated laptops")
 
-    impact_df = allocated_df.sort_values("laptops_allocated", ascending=False).head(10).copy()
+    top_alloc_df = allocated_df.sort_values(
+        ["laptops_allocated", "urgency_score"],
+        ascending=[False, False]
+    ).head(15).copy()
 
-    if impact_df.empty or impact_df["laptops_allocated"].sum() == 0:
-        st.info("Enter more than 0 laptops to see the simulated allocation impact.")
+    if top_alloc_df.empty or top_alloc_df["laptops_allocated"].sum() == 0:
+        st.info("Enter more than 0 laptops to see top recipient districts.")
     else:
-        impact_fig = px.bar(
-            impact_df.sort_values("laptops_allocated", ascending=True),
+        top_alloc_fig = px.bar(
+            top_alloc_df.sort_values(["laptops_allocated", "urgency_score"], ascending=[True, True]),
             x="laptops_allocated",
             y="district_name",
             orientation="h",
@@ -424,17 +468,65 @@ with col2:
                 "students_helped_est": True,
                 "pct_no_internet": ':.1%',
             },
-            title="Simulated laptop allocation impact",
+            title="Top districts receiving laptops",
         )
-        impact_fig.update_layout(
+        top_alloc_fig.update_layout(
             xaxis_title="Allocated laptops",
             yaxis_title="District",
             height=450,
         )
-        st.plotly_chart(impact_fig, use_container_width=True)
+        st.plotly_chart(top_alloc_fig, use_container_width=True)
+
+scatter_left, scatter_right = st.columns(2)
+
+with scatter_left:
+    scatter_fig = px.scatter(
+        allocated_df,
+        x="median_income",
+        y="pct_no_internet",
+        size="students_under_18",
+        color="urgency_score",
+        hover_name="district_name",
+        hover_data={
+            "laptops_allocated": True,
+            "students_helped_est": True,
+        },
+        color_continuous_scale=BLUE_GRADIENT,
+        labels={"median_income": "Median Income", "pct_no_internet": "% No Internet"},
+        title="Connectivity vs. household income",
+    )
+    scatter_fig.update_traces(
+        marker=dict(
+            line=dict(width=1, color="white"),
+            opacity=0.9,
+        )
+    )
+    scatter_fig.update_layout(height=450)
+    st.plotly_chart(scatter_fig, use_container_width=True)
+
+with scatter_right:
+    region_alloc = (
+        allocated_df.groupby("region", dropna=False)["laptops_allocated"]
+        .sum()
+        .reset_index()
+        .sort_values("laptops_allocated", ascending=False)
+    )
+
+    region_fig = px.bar(
+        region_alloc,
+        x="region",
+        y="laptops_allocated",
+        title="Total laptops allocated by region",
+    )
+    region_fig.update_layout(
+        xaxis_title="Region",
+        yaxis_title="Allocated laptops",
+        height=450,
+    )
+    st.plotly_chart(region_fig, use_container_width=True)
 
 # =========================
-# 6) AI ASSISTANT
+# 7) AI ASSISTANT
 # =========================
 st.divider()
 st.subheader("🤖 AI Assistant")
