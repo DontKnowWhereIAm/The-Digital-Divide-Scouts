@@ -46,6 +46,7 @@ def assign_region(longitude):
         return "Central"
     return "East"
 
+
 def categorize_access(gap):
     if pd.isna(gap):
         return "Unknown"
@@ -57,12 +58,12 @@ def categorize_access(gap):
         return "Moderate"
     return "Lower"
 
+
 @st.cache_data(show_spinner=False)
 def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",)):
     acs_base = f"https://api.census.gov/data/{year}/acs/acs5"
     acs_sub = f"https://api.census.gov/data/{year}/acs/acs5/subject"
     geo_for = "school district (unified):*"
-    geo_in = f"state:{','.join(state_fips_tuple)}"
 
     vars_main = [
         "B09001_001E",  # students under 18
@@ -73,42 +74,72 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
     ]
     s1901_income = "S1901_C01_012E"
 
-    r_m = requests.get(
-        acs_base,
-        params={
-            "get": "NAME," + ",".join(vars_main),
-            "for": geo_for,
-            "in": geo_in,
-            "key": api_key,
-        },
-        timeout=60,
-    )
-    r_m.raise_for_status()
-    r_m = r_m.json()
+    dfs_main = []
+    dfs_income = []
+    gdfs = []
 
-    r_i = requests.get(
-        acs_sub,
-        params={
-            "get": "NAME," + s1901_income,
-            "for": geo_for,
-            "in": geo_in,
-            "key": api_key,
-        },
-        timeout=60,
-    )
-    r_i.raise_for_status()
-    r_i = r_i.json()
+    for fips in state_fips_tuple:
+        geo_in = f"state:{fips}"
 
-    df = pd.DataFrame(r_m[1:], columns=r_m[0]).merge(
-        pd.DataFrame(r_i[1:], columns=r_i[0]),
+        # Census main table
+        r_m = requests.get(
+            acs_base,
+            params={
+                "get": "NAME," + ",".join(vars_main),
+                "for": geo_for,
+                "in": geo_in,
+                "key": api_key,
+            },
+            timeout=60,
+        )
+        r_m.raise_for_status()
+        j_m = r_m.json()
+        dfs_main.append(pd.DataFrame(j_m[1:], columns=j_m[0]))
+
+        # Census income table
+        r_i = requests.get(
+            acs_sub,
+            params={
+                "get": "NAME," + s1901_income,
+                "for": geo_for,
+                "in": geo_in,
+                "key": api_key,
+            },
+            timeout=60,
+        )
+        r_i.raise_for_status()
+        j_i = r_i.json()
+        dfs_income.append(pd.DataFrame(j_i[1:], columns=j_i[0]))
+
+        # TIGER geometry per state
+        tiger_url = (
+            "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/School/MapServer/10/query"
+            f"?where=STATE='{fips}'&outFields=GEOID,NAME,STATE&outSR=4326&f=geojson&returnGeometry=true"
+        )
+        try:
+            t_gdf = gpd.read_file(tiger_url)
+            if not t_gdf.empty:
+                gdfs.append(t_gdf)
+        except Exception:
+            continue
+
+    if not dfs_main or not dfs_income:
+        raise ValueError("No Census data could be loaded for the selected state(s).")
+
+    df_main = pd.concat(dfs_main, ignore_index=True)
+    df_income = pd.concat(dfs_income, ignore_index=True)
+
+    df = df_main.merge(
+        df_income[["state", "school district (unified)", s1901_income]],
         on=["state", "school district (unified)"],
+        how="left",
     )
 
     for c in vars_main + [s1901_income]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df["GEOID"] = df["state"].str.zfill(2) + df["school district (unified)"].str.zfill(5)
-    df["district_name"] = df["NAME_x"]
+    df["district_name"] = df["NAME_x"] if "NAME_x" in df.columns else df["NAME"]
     df["students_under_18"] = df["B09001_001E"]
     df["households_no_internet"] = df["B28002_013E"]
     df["households_no_computer"] = df["B28001_011E"]
@@ -118,31 +149,28 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
         df["households_no_internet"] / df["B28002_001E"].replace(0, np.nan)
     ).fillna(0)
 
-    df["urgency_score"] = (
-        (df["students_under_18"] / df["students_under_18"].max()) * 0.4
-        + df["pct_no_internet"] * 0.6
-    ).fillna(0)
+    max_students = df["students_under_18"].max()
+    if pd.isna(max_students) or max_students == 0:
+        student_component = pd.Series(0.0, index=df.index)
+    else:
+        student_component = df["students_under_18"] / max_students
 
+    df["urgency_score"] = (student_component * 0.4 + df["pct_no_internet"] * 0.6).fillna(0)
     df["access_level"] = df["pct_no_internet"].apply(categorize_access)
-
-    gdfs = []
-    for fips in state_fips_tuple:
-        url = (
-            "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/School/MapServer/10/query"
-            f"?where=STATE='{fips}'&outFields=GEOID,NAME&outSR=4326&f=geojson"
-        )
-        try:
-            t_gdf = gpd.read_file(url)
-            if not t_gdf.empty:
-                gdfs.append(t_gdf)
-        except Exception:
-            continue
 
     if not gdfs:
         raise ValueError("No geometry data could be loaded for the selected state(s).")
 
     full_gdf = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs="EPSG:4326")
-    gdf = full_gdf.merge(df, on="GEOID")
+
+    # Simplify more for large national views to keep rendering responsive
+    simplify_tol = 0.015 if len(state_fips_tuple) > 20 else 0.005
+    full_gdf["geometry"] = full_gdf["geometry"].simplify(
+        tolerance=simplify_tol,
+        preserve_topology=True,
+    )
+
+    gdf = full_gdf.merge(df, on="GEOID", how="inner")
 
     centroids = gdf.to_crs(epsg=3857).geometry.centroid.to_crs(epsg=4326)
     gdf["longitude"] = centroids.x
@@ -151,15 +179,17 @@ def load_homework_gap_data(api_key, year=DEFAULT_YEAR, state_fips_tuple=("37",))
 
     return df, gdf
 
+
 def simulate_allocation(df, total_laptops):
     sim = df.copy()
-    if sim["urgency_score"].sum() == 0:
+    if sim.empty or sim["urgency_score"].sum() == 0:
         sim["laptops_allocated"] = 0
     else:
         sim["laptops_allocated"] = (
             sim["urgency_score"] / sim["urgency_score"].sum() * total_laptops
         ).astype(int)
     return sim
+
 
 # =========================
 # 2) APP UI & SIDEBAR
@@ -181,8 +211,11 @@ with st.sidebar:
         st.info("👈 Please select at least one state from the sidebar to load data.")
         st.stop()
 
-    if "All States" in selected_states:
+    is_all_states = "All States" in selected_states
+
+    if is_all_states:
         selected_fips = ALL_STATE_FIPS
+        st.warning("National view may take longer to load. The map is capped at the top 300 districts for performance.")
     else:
         selected_fips = tuple(STATES[s] for s in selected_states if s in STATES)
 
@@ -198,28 +231,34 @@ if len(selected_fips) > 5:
         "The first run may take longer because results are being cached."
     )
 
-df_raw, gdf_map = load_homework_gap_data(api_key, DEFAULT_YEAR, selected_fips)
+try:
+    df_raw, gdf_map = load_homework_gap_data(api_key, DEFAULT_YEAR, selected_fips)
+except Exception as e:
+    st.error(f"Could not load data for the selected state(s): {e}")
+    st.stop()
 
 with st.sidebar:
+    income_max = int(df_raw["median_income"].dropna().max()) if not df_raw["median_income"].dropna().empty else 250000
+
     income_range = st.slider(
         "Median household income range",
         0,
-        int(df_raw["median_income"].max() or 250000),
-        (0, int(df_raw["median_income"].max() or 250000)),
+        income_max,
+        (0, income_max),
     )
 
-    region_options = ["West", "Central", "East"]
+    region_options = sorted(gdf_map["region"].dropna().unique().tolist()) if "region" in gdf_map.columns else ["West", "Central", "East"]
     selected_regions = st.multiselect(
         "Region",
         options=region_options,
         default=region_options,
     )
 
-    access_options = ["Critical", "High", "Moderate", "Lower"]
+    access_options = ["Critical", "High", "Moderate", "Lower", "Unknown"]
     selected_access = st.multiselect(
         "Access level",
         options=access_options,
-        default=access_options,
+        default=["Critical", "High", "Moderate", "Lower"],
     )
 
     gap_range = st.slider(
@@ -241,7 +280,7 @@ with st.sidebar:
 # 3) DATA PROCESSING
 # =========================
 filtered_gdf = gdf_map[
-    (gdf_map["median_income"].between(income_range[0], income_range[1])) &
+    (gdf_map["median_income"].isna() | gdf_map["median_income"].between(income_range[0], income_range[1])) &
     (gdf_map["region"].isin(selected_regions)) &
     (gdf_map["access_level"].isin(selected_access)) &
     ((gdf_map["pct_no_internet"] * 100).between(gap_range[0], gap_range[1]))
@@ -254,9 +293,9 @@ allocated_df = simulate_allocation(filtered_gdf, laptops_available)
 # =========================
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Districts in scope", f"{len(allocated_df):,}")
-m2.metric("Students under 18", f"{int(allocated_df['students_under_18'].sum()):,}" if not allocated_df.empty else "0")
-m3.metric("Households with no internet", f"{int(allocated_df['households_no_internet'].sum()):,}" if not allocated_df.empty else "0")
-m4.metric("Households with no computer", f"{int(allocated_df['households_no_computer'].sum()):,}" if not allocated_df.empty else "0")
+m2.metric("Students under 18", f"{int(allocated_df['students_under_18'].fillna(0).sum()):,}" if not allocated_df.empty else "0")
+m3.metric("Households with no internet", f"{int(allocated_df['households_no_internet'].fillna(0).sum()):,}" if not allocated_df.empty else "0")
+m4.metric("Households with no computer", f"{int(allocated_df['households_no_computer'].fillna(0).sum()):,}" if not allocated_df.empty else "0")
 
 m5, m6, m7, m8 = st.columns(4)
 m5.metric("Laptops allocated", f"{int(allocated_df['laptops_allocated'].sum()):,}" if not allocated_df.empty else "0")
@@ -301,22 +340,37 @@ with col1:
 
 with col2:
     st.subheader("Map of filtered districts")
-    map_fig = px.choropleth_mapbox(
-        allocated_df,
-        geojson=allocated_df.geometry.__geo_interface__,
-        locations=allocated_df.index,
-        color="urgency_score",
-        hover_name="district_name",
-        center={
-            "lat": float(allocated_df["latitude"].mean()),
-            "lon": float(allocated_df["longitude"].mean()),
-        },
-        zoom=3.5,
-        mapbox_style="carto-positron",
-        color_continuous_scale=BLUE_GRADIENT,
-    )
-    map_fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-    st.plotly_chart(map_fig, use_container_width=True)
+
+    MAP_DISTRICT_CAP = 300
+    map_df = allocated_df.sort_values("urgency_score", ascending=False).head(MAP_DISTRICT_CAP).copy()
+
+    if len(allocated_df) > MAP_DISTRICT_CAP:
+        st.caption(
+            f"⚠️ Showing top {MAP_DISTRICT_CAP} of {len(allocated_df):,} filtered districts on the map "
+            "(ranked by urgency score). Use the sidebar filters or 'Show top districts' slider to narrow down."
+        )
+
+    if map_df.empty:
+        st.warning("Adjust filters to see data on map.")
+    else:
+        zoom = 3.2 if len(selected_fips) >= 30 else 4.0 if len(selected_fips) >= 10 else 5.5
+
+        map_fig = px.choropleth_mapbox(
+            map_df,
+            geojson=map_df.geometry.__geo_interface__,
+            locations=map_df.index,
+            color="urgency_score",
+            hover_name="district_name",
+            center={
+                "lat": float(map_df["latitude"].mean()),
+                "lon": float(map_df["longitude"].mean()),
+            },
+            zoom=zoom,
+            mapbox_style="carto-positron",
+            color_continuous_scale=BLUE_GRADIENT,
+        )
+        map_fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+        st.plotly_chart(map_fig, use_container_width=True)
 
     st.subheader("Connectivity vs. Household Income")
     scatter_fig = px.scatter(
