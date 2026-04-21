@@ -173,7 +173,7 @@ with st.sidebar:
     selected_states = st.multiselect(
         "State(s)",
         options=["All States"] + sorted(STATES.keys()),
-        default=["North Carolina"],
+        default=["All States"],
         help="Choose one or more states, or 'All States' for a national view.",
     )
 
